@@ -5,7 +5,7 @@ const $ = (sel) => document.querySelector(sel);
 
 /* ---------------- 视图切换 ---------------- */
 
-const VIEW_IDS = ["typeset", "decode", "avoid"];
+const VIEW_IDS = ["typeset", "decode", "avoid", "inspect"];
 
 document.querySelectorAll(".tab").forEach((btn) => {
   btn.addEventListener("click", () => {
@@ -707,3 +707,353 @@ for (const input of [avo.front, avo.back]) {
 }
 
 updateAvoCounts();
+
+/* ---------------- 压印点位复核视图 ---------------- */
+
+const ins = {
+  text: $("#insText"),
+  points: $("#insPoints"),
+  textCount: $("#insTextCount"),
+  pointCount: $("#insPointCount"),
+  width: $("#insWidth"),
+  btn: $("#btnInspect"),
+  btnSample: $("#btnInsSample"),
+  btnClear: $("#btnInsClear"),
+  errors: $("#insErrorBox"),
+  panel: $("#insResultPanel"),
+  verdict: $("#insVerdict"),
+  stats: $("#insStats"),
+  overlay: $("#insOverlay"),
+  missCount: $("#insMissCount"),
+  missing: $("#insMissing"),
+  extraCount: $("#insExtraCount"),
+  extras: $("#insExtras"),
+  copy: $("#btnInsCopy"),
+};
+
+const INS_LIST_MAX = 200; // 缺失/多余列表最多直接列出的条数（叠加图始终全量标出）
+
+let lastInspect = null;
+
+// POSIX 口径：结尾单个换行不计数；其余每个换行分隔一行
+function countPointLines(s) {
+  let v = s.replace(/\r\n?/g, "\n");
+  if (v.endsWith("\n")) v = v.slice(0, -1);
+  return v === "" ? 0 : v.split("\n").length;
+}
+
+// 1 基行号 -> 文本偏移（用于点击错误定位）
+function lineStartOffset(s, line1) {
+  if (line1 <= 1) return 0;
+  let idx = -1;
+  for (let i = 1; i < line1; i++) {
+    idx = s.indexOf("\n", idx + 1);
+    if (idx === -1) return s.length;
+  }
+  return idx + 1;
+}
+
+function updateInsCounts() {
+  const nt = ins.text.value.length;
+  const np = countPointLines(ins.points.value);
+  ins.textCount.textContent = String(nt);
+  ins.pointCount.textContent = String(np);
+  ins.textCount.parentElement.classList.toggle("over", nt > 100);
+  ins.pointCount.parentElement.classList.toggle("over", np > 400);
+}
+
+ins.text.addEventListener("input", updateInsCounts);
+ins.points.addEventListener("input", updateInsCounts);
+
+function showInsErrors(errors) {
+  ins.panel.hidden = true;
+  ins.errors.innerHTML = "";
+  const h = document.createElement("h3");
+  h.textContent = `发现 ${errors.length} 处问题，请修正后重试：`;
+  ins.errors.appendChild(h);
+  const ul = document.createElement("ul");
+  for (const err of errors) {
+    const li = document.createElement("li");
+    li.textContent = err.message;
+    if (err.source === "text" && typeof err.pos === "number") {
+      li.title = "点击定位到输入位置";
+      li.addEventListener("click", () => {
+        ins.text.focus();
+        ins.text.setSelectionRange(err.pos, err.pos + (err.length || 1));
+      });
+    } else if (err.source === "points" && typeof err.line === "number") {
+      li.title = "点击定位到出错位置";
+      const off = lineStartOffset(ins.points.value, err.line);
+      const col = typeof err.col === "number" ? err.col : 1;
+      li.addEventListener("click", () => {
+        ins.points.focus();
+        ins.points.setSelectionRange(off + col - 1, off + col);
+      });
+    }
+    ul.appendChild(li);
+  }
+  ins.errors.appendChild(ul);
+  ins.errors.hidden = false;
+}
+
+async function doInspect() {
+  const text = ins.text.value;
+  const points = ins.points.value;
+  const width = Number(ins.width.value);
+
+  // 前端即时校验（最终以服务端为准）
+  const local = [];
+  if (!/^[\x20\nA-Za-z0-9]*$/.test(text)) {
+    local.push("原文含非法字符：仅允许 ASCII 字母、数字、空格与换行。");
+  }
+  if (text.length > 100) local.push("原文超过 100 个字符。");
+  if (!/[A-Za-z0-9]/.test(text)) local.push("原文至少需要包含一个字母或数字。");
+  if (!Number.isInteger(width) || width < 10 || width > 40) {
+    local.push("每行格数须为 10～40 的整数。");
+  }
+  const nlines = countPointLines(points);
+  if (nlines > 400) local.push(`实测坐标 ${nlines} 行，超过 400 行上限。`);
+  if (local.length) {
+    showInsErrors([{ message: local.join("\n") }]);
+    return;
+  }
+
+  ins.btn.disabled = true;
+  try {
+    const resp = await fetch("/api/inspect", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text, width, points }),
+    });
+    const data = await resp.json();
+    if (!resp.ok || data.ok === false) {
+      showInsErrors(data.errors || [{ message: "复核失败。" }]);
+      return;
+    }
+    ins.errors.hidden = true;
+    renderInspect(data);
+  } catch (e) {
+    showInsErrors([{ message: "请求失败：" + e }]);
+  } finally {
+    ins.btn.disabled = false;
+  }
+}
+
+/* ---------------- 复核叠加图与结果渲染 ---------------- */
+
+function renderInsOverlay(r) {
+  const rows = r.typeset.lines.length;
+  const pad = 4; // 留白，容纳 ±3mm 位移与多余点
+
+  // 理论点
+  const theory = [];
+  r.typeset.lines.forEach((line, rr) => {
+    line.cells.forEach((cell, c) => {
+      for (const d of cell.dots) {
+        const [ox, oy] = dotOffset(d);
+        theory.push({
+          key: `${rr},${c},${d}`,
+          x: 6 * c + ox,
+          y: 10 * rr + oy,
+        });
+      }
+    });
+  });
+
+  // 实测点（已加最优位移）
+  const measured = r.measured_points.map((p) => ({
+    line: p.line,
+    x: p.x + r.dx,
+    y: p.y + r.dy,
+  }));
+
+  const missSet = new Set(
+    r.missing.map((m) => `${m.row},${m.cell},${m.dot}`));
+  const extraSet = new Set(r.extras);
+  const matchOf = new Map();
+  for (const m of r.matches) {
+    matchOf.set(`${m.theory.row},${m.theory.cell},${m.theory.dot}`, m.measured_line);
+  }
+  const measuredByLine = new Map(measured.map((p) => [p.line, p]));
+
+  // 坐标范围：网格 + 全部点（含越界的多余点）
+  let minX = 0, minY = 0, maxX = 6 * (r.width - 1) + 2.5, maxY = (rows - 1) * 10 + 5;
+  for (const p of measured) {
+    minX = Math.min(minX, p.x);
+    minY = Math.min(minY, p.y);
+    maxX = Math.max(maxX, p.x);
+    maxY = Math.max(maxY, p.y);
+  }
+  const X = (v) => (v - minX + pad) * MM;
+  const Y = (v) => (v - minY + pad) * MM;
+
+  const svg = ins.overlay;
+  svg.innerHTML = "";
+  svg.setAttribute("width", (maxX - minX + 2 * pad) * MM);
+  svg.setAttribute("height", (maxY - minY + 2 * pad) * MM);
+
+  // 行格参考线
+  const grid = svgEl("g", { class: "ov-grid" });
+  for (let rr = 0; rr < rows; rr++) {
+    for (let c = 0; c < r.width; c++) {
+      grid.appendChild(svgEl("rect", {
+        x: X(6 * c - 1.75), y: Y(10 * rr - 2.5),
+        width: 6 * MM, height: 10 * MM,
+      }));
+    }
+  }
+  svg.appendChild(grid);
+
+  // 已配对实测点 -> 理论点的细连线
+  const links = svgEl("g", { class: "ov-links" });
+  for (const t of theory) {
+    if (!matchOf.has(t.key)) continue;
+    const mp = measuredByLine.get(matchOf.get(t.key));
+    if (!mp) continue;
+    links.appendChild(svgEl("line", {
+      class: "ov-match-line",
+      x1: X(t.x), y1: Y(t.y), x2: X(mp.x), y2: Y(mp.y),
+    }));
+  }
+  svg.appendChild(links);
+
+  // 理论凸点（缺失者红圈描边）
+  for (const t of theory) {
+    svg.appendChild(svgEl("circle", {
+      class: "ov-theory" + (missSet.has(t.key) ? " miss" : ""),
+      cx: X(t.x), cy: Y(t.y), r: DOT_R * MM,
+    }));
+  }
+
+  // 实测点：配对点画蓝点；多余点画红叉
+  const cross = 0.9 * MM;
+  for (const p of measured) {
+    if (extraSet.has(p.line)) {
+      svg.appendChild(svgEl("path", {
+        class: "ov-extra-x",
+        d: `M ${X(p.x) - cross} ${Y(p.y) - cross} l ${2 * cross} ${2 * cross}` +
+           ` M ${X(p.x) + cross} ${Y(p.y) - cross} l ${-2 * cross} ${2 * cross}`,
+      }));
+    } else {
+      svg.appendChild(svgEl("circle", {
+        class: "ov-measured",
+        cx: X(p.x), cy: Y(p.y), r: DOT_R * MM,
+      }));
+    }
+  }
+}
+
+function renderInsLists(r) {
+  ins.missCount.textContent = String(r.missing_count);
+  ins.extraCount.textContent = String(r.extra_count);
+  ins.missing.innerHTML = "";
+  ins.extras.innerHTML = "";
+
+  if (r.missing_count === 0) {
+    const div = document.createElement("div");
+    div.className = "conf-empty";
+    div.textContent = "无缺失：每个理论凸点都已与实测点配对。";
+    ins.missing.appendChild(div);
+  } else {
+    for (const m of r.missing.slice(0, INS_LIST_MAX)) {
+      const div = document.createElement("div");
+      div.className = "conf-item";
+      div.textContent = `行 ${m.row} · 格 ${m.cell} · 点 ${m.dot}`;
+      ins.missing.appendChild(div);
+    }
+    if (r.missing_count > INS_LIST_MAX) {
+      const more = document.createElement("div");
+      more.className = "conf-more";
+      more.textContent = `…其余 ${r.missing_count - INS_LIST_MAX} 个从略（叠加图中已全部标出）。`;
+      ins.missing.appendChild(more);
+    }
+  }
+
+  if (r.extra_count === 0) {
+    const div = document.createElement("div");
+    div.className = "conf-empty";
+    div.textContent = "无多余：每个实测点都已与理论点配对。";
+    ins.extras.appendChild(div);
+  } else {
+    for (const line of r.extras.slice(0, INS_LIST_MAX)) {
+      const div = document.createElement("div");
+      div.className = "conf-item";
+      div.textContent = `第 ${line + 1} 行`;
+      ins.extras.appendChild(div);
+    }
+    if (r.extra_count > INS_LIST_MAX) {
+      const more = document.createElement("div");
+      more.className = "conf-more";
+      more.textContent = `…其余 ${r.extra_count - INS_LIST_MAX} 个从略（叠加图中已全部标出）。`;
+      ins.extras.appendChild(more);
+    }
+  }
+}
+
+function renderInspect(r) {
+  lastInspect = r;
+  ins.panel.hidden = false;
+
+  ins.verdict.className = "verdict " + (r.perfect ? "ok" : "bad");
+  ins.verdict.textContent = r.perfect
+    ? `✓ 复核通过：位移 dx=${fmtShift(r.dx)}、dy=${fmtShift(r.dy)} 下 ${r.matched_count} 个凸点全部一一配对，无缺失、无多余。`
+    : `✗ 复核异常：位移 dx=${fmtShift(r.dx)}、dy=${fmtShift(r.dy)} 下匹配 ${r.matched_count} 点，` +
+      `缺失理论点 ${r.missing_count} 个、多余实测点 ${r.extra_count} 个。`;
+
+  ins.stats.innerHTML = [
+    `行宽：<b>${r.width}</b> 格`,
+    `理论凸点：<b>${r.theory_count}</b> 个`,
+    `实测点：<b>${r.measured_count}</b> 个`,
+    `已配对：<b>${r.matched_count}</b>`,
+    `缺失：<b>${r.missing_count}</b>`,
+    `多余：<b>${r.extra_count}</b>`,
+    `最佳位移：<b>dx=${fmtShift(r.dx)}，dy=${fmtShift(r.dy)}</b>`,
+    `匹配距离平方和：<b>${r.distance2_sum.toFixed(3)}</b> mm²`,
+  ].map((s) => `<span>${s}</span>`).join("");
+
+  renderInsOverlay(r);
+  renderInsLists(r);
+  ins.panel.scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+ins.btn.addEventListener("click", doInspect);
+
+ins.copy.addEventListener("click", () => {
+  if (!lastInspect) return;
+  const r = lastInspect;
+  const head = r.perfect ? "压印点位复核结果：通过。" : "压印点位复核结果：异常。";
+  copyText(ins.copy, head +
+    `行宽 ${r.width} 格，最佳位移 dx=${fmtShift(r.dx)}、dy=${fmtShift(r.dy)}；` +
+    `理论 ${r.theory_count} 点 / 实测 ${r.measured_count} 点，` +
+    `匹配 ${r.matched_count}，缺失 ${r.missing_count}，多余 ${r.extra_count}。`);
+});
+
+ins.btnClear.addEventListener("click", () => {
+  ins.text.value = "";
+  ins.points.value = "";
+  updateInsCounts();
+  ins.errors.hidden = true;
+  ins.panel.hidden = true;
+  ins.text.focus();
+});
+
+ins.btnSample.addEventListener("click", () => {
+  // a=(0,0)；b 理论点为 (6.0,0.0) 与 (6.0,2.5)。实测整体偏移 (+0.5,+0.3)，
+  // 且漏掉 b 的点 2、多出第 3 行的 (9.9,9.9)。
+  ins.text.value = "ab";
+  ins.width.value = 10;
+  ins.points.value = "0.5,0.3\n6.5,0.3\n9.9,9.9";
+  updateInsCounts();
+  doInspect();
+});
+
+for (const input of [ins.text, ins.points]) {
+  input.addEventListener("keydown", (e) => {
+    if ((e.ctrlKey || e.metaKey) && e.key === "Enter") {
+      e.preventDefault();
+      doInspect();
+    }
+  });
+}
+
+updateInsCounts();

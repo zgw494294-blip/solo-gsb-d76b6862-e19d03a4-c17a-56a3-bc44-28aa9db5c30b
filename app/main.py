@@ -10,9 +10,10 @@ from pydantic import BaseModel, Field
 
 from .avoid import avoid
 from .braille import ValidationError, typeset
+from .inspect import inspect
 from .reader import decode
 
-app = FastAPI(title="六点盲文排版台", version="1.2.0")
+app = FastAPI(title="六点盲文排版台", version="1.3.0")
 
 
 class TypesetIn(BaseModel):
@@ -35,6 +36,14 @@ class AvoidIn(BaseModel):
     back: str = Field(..., description="反面原文：同正面")
     width: int = Field(..., description="共同行宽：每行 10～40 格")
     min_distance: float = Field(..., description="最小点距 0.1～3.0 毫米，限一位小数")
+
+
+class InspectIn(BaseModel):
+    # 原文与行宽由 braille.validate 统一校验（长度上限 100），
+    # 实测坐标由 inspect.parse_points 逐行解析并按行、列定位报错；这里仅约束基本类型。
+    text: str = Field(..., description="原文：ASCII 字母、数字、空格与换行，不超过 100 字符")
+    width: int = Field(..., description="每行 10～40 格")
+    points: str = Field(..., description="实测凸点坐标：每行 x,y（毫米，限一位小数），0～400 行")
 
 
 @app.exception_handler(RequestValidationError)
@@ -80,10 +89,19 @@ def api_avoid(payload: AvoidIn):
     return result
 
 
+@app.post("/api/inspect")
+def api_inspect(payload: InspectIn):
+    try:
+        result = inspect(payload.text, payload.width, payload.points)
+    except ValidationError as exc:
+        return JSONResponse(status_code=422, content={"ok": False, "errors": exc.errors})
+    result["ok"] = True
+    return result
+
+
 @app.get("/api/health")
 def health():
     return {"ok": True}
-
 
 app.mount("/static", StaticFiles(directory="app/static"), name="static")
 

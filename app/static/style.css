@@ -441,6 +441,49 @@ textarea.braille-input {
 }
 .conf-empty, .conf-more { color: var(--muted); font-size: 13px; }
 
+/* 压印点位复核视图 */
+#insOverlay { display: block; }
+.ov-theory {
+  fill: none;
+  stroke: var(--dot-on);
+  stroke-width: 1.8;
+}
+.ov-theory.miss {
+  stroke: var(--error-border);
+  stroke-width: 2.8;
+}
+.ov-measured { fill: #2f6fb2; fill-opacity: .6; }
+.ov-match-line {
+  stroke: #2f6fb2;
+  stroke-width: 0.8;
+  stroke-opacity: .45;
+}
+.ov-extra-x {
+  stroke: var(--error-border);
+  stroke-width: 2.2;
+  stroke-linecap: round;
+  fill: none;
+}
+.dot-sw-theory {
+  background: transparent;
+  border: 2px solid var(--dot-on);
+}
+.dot-sw-measured { background: rgba(47, 111, 178, .6); }
+.dot-sw-missing {
+  background: transparent;
+  border: 2.5px solid var(--error-border);
+}
+.dot-sw-extra {
+  background: transparent;
+  border: none;
+  color: var(--error-border);
+  font-weight: 700;
+  font-size: 13px;
+  line-height: 12px;
+  text-align: center;
+}
+.dot-sw-extra span { display: block; margin-top: -1px; }
+
 @media (max-width: 640px) {
   .avoid-inputs { grid-template-columns: 1fr; }
 }

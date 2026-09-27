@@ -9,7 +9,7 @@
 <body>
 <header class="site-header">
   <h1>六点盲文排版台</h1>
-  <p class="subtitle">英语一级（Grade 1）六点盲文 · 转写排版 ↔ 识读还原 · 双面点阵避让 · 完全离线运行</p>
+  <p class="subtitle">英语一级（Grade 1）六点盲文 · 转写排版 ↔ 识读还原 · 双面点阵避让 · 压印点位复核 · 完全离线运行</p>
 </header>
 
 <main>
@@ -17,6 +17,7 @@
     <button type="button" class="tab active" data-view="typeset">盲文排版</button>
     <button type="button" class="tab" data-view="decode">盲文识读</button>
     <button type="button" class="tab" data-view="avoid">双面避让</button>
+    <button type="button" class="tab" data-view="inspect">点位复核</button>
   </nav>
 
   <div id="view-typeset" class="view">
@@ -200,6 +201,92 @@
         <li>反面点 (x, y) 映射到正面坐标 (6(w−1)+2.5−x+dx, y+dy)；dx、dy 各取 −3～3 毫米、步长 0.1 毫米，遍历全部 61×61 个位移。</li>
         <li>两面点距小于最小点距（0.1～3.0 毫米，限一位小数）记一对冲突；距离以放大 10 倍的整数平方比较。</li>
         <li>按 <b>冲突对数 → dx²+dy² → dx → dy</b> 依次最小择优；零冲突即可行，否则说明仍有冲突。</li>
+      </ul>
+    </section>
+  </div>
+
+  <div id="view-inspect" class="view" hidden>
+    <section class="panel input-panel">
+      <div class="panel-head">
+        <h2>① 输入原文与实测凸点坐标</h2>
+        <span class="hint">沿用该原文的排版理论点阵，复核压印位置</span>
+      </div>
+      <div class="avoid-inputs">
+        <div class="avoid-input">
+          <div class="avoid-input-head">
+            <label for="insText">原文</label>
+            <span class="counter"><span id="insTextCount">0</span> / 100</span>
+          </div>
+          <textarea id="insText" rows="4" maxlength="100" spellcheck="false"
+            placeholder="原文：仅 ASCII 字母、数字、空格与换行，不超过 100 字符；换行＝硬分段。"></textarea>
+        </div>
+        <div class="avoid-input">
+          <div class="avoid-input-head">
+            <label for="insPoints">实测凸点坐标</label>
+            <span class="counter"><span id="insPointCount">0</span> / 400 行</span>
+          </div>
+          <textarea id="insPoints" rows="4" spellcheck="false"
+            placeholder="每行一个凸点 x,y（毫米，限一位小数），如 6.0,2.5；共 0～400 行，空文本即无实测点。"></textarea>
+        </div>
+      </div>
+
+      <div class="controls">
+        <label class="width-label">每行格数
+          <input type="number" id="insWidth" min="10" max="40" step="1" value="20">
+          <span class="hint">10～40 格</span>
+        </label>
+        <div class="buttons">
+          <button type="button" id="btnInspect" class="primary">复核（Ctrl+Enter）</button>
+          <button type="button" id="btnInsSample">示例</button>
+          <button type="button" id="btnInsClear">清空</button>
+        </div>
+      </div>
+
+      <div id="insErrorBox" class="error-box" hidden></div>
+    </section>
+
+    <section class="panel result-panel" id="insResultPanel" hidden>
+      <div class="panel-head">
+        <h2>② 复核结果与点位叠加</h2>
+        <div class="buttons">
+          <button type="button" id="btnInsCopy">复制结果摘要</button>
+        </div>
+      </div>
+
+      <div id="insVerdict" class="verdict"></div>
+
+      <div class="stats" id="insStats"></div>
+
+      <div class="legend">
+        <span class="legend-item"><i class="dot-sw dot-sw-theory"></i>理论凸点（空心）</span>
+        <span class="legend-item"><i class="dot-sw dot-sw-measured"></i>实测点（平移后）</span>
+        <span class="legend-item"><i class="dot-sw dot-sw-missing"></i>缺失理论点</span>
+        <span class="legend-item"><i class="dot-sw dot-sw-extra"><span>✕</span></i>多余实测点</span>
+      </div>
+
+      <div class="overlay-wrap">
+        <svg id="insOverlay" role="img" aria-label="压印点位复核叠加图"></svg>
+      </div>
+
+      <h3 class="conf-title">缺失理论点（<span id="insMissCount">0</span>）
+        <span class="hint">行、格、点号均为零基编号</span>
+      </h3>
+      <div id="insMissing" class="conf-list"></div>
+
+      <h3 class="conf-title">多余实测点（<span id="insExtraCount">0</span>）
+        <span class="hint">括号内为 1 基输入行号</span>
+      </h3>
+      <div id="insExtras" class="conf-list"></div>
+    </section>
+
+    <section class="panel rules">
+      <h2>复核规则</h2>
+      <ul>
+        <li>理论凸点沿用排版结果：零基行格 (r, c) 中，点 1～3 坐标 (6c, 10r+2.5k)，点 4～6 坐标 (6c+2.5, 10r+2.5k)，k=0～2，单位毫米，只计凸点。</li>
+        <li>实测点整体平移 dx、dy（各 −3～3 毫米、步长 0.1 毫米），遍历全部 61×61 个位移；与距离不超过 0.4 毫米的理论点一对一配对。</li>
+        <li>理论点按（行、格、点号）升序依次配对：同一理论点有多个候选实测点时取最近者，同距取输入行号较早者；配对后实测点退出。</li>
+        <li>位移依次比较：<b>匹配点数最多 → 匹配距离平方和最小 → dx²+dy² 最小 → dx 最小 → dy 最小</b>。</li>
+        <li>未配对的理论点记为<b>缺失</b>（零基行/格/点号），未配对的实测点记为<b>多余</b>（1 基输入行号）。</li>
       </ul>
     </section>
   </div>
