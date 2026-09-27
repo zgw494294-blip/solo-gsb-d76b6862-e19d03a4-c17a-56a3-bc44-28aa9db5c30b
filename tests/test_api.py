@@ -190,3 +190,99 @@ def test_avoid_missing_field():
     resp = client.post("/api/avoid", json={"front": "a", "back": "a", "width": 10})
     assert resp.status_code == 422
     assert resp.json()["ok"] is False
+
+
+def test_inspect_ok_shift_recovers_offset():
+    resp = client.post("/api/inspect", json={
+        "text": "a", "width": 10, "points": "0.1,0.2",
+    })
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["ok"] is True
+    assert (data["dx"], data["dy"]) == (-0.1, -0.2)
+    assert data["matched"] == 1
+    assert data["perfect"] is True
+    assert data["missing_dots"] == []
+    assert data["extra_points"] == []
+    assert data["layout"]["braille_text"] == "⠁"
+
+
+def test_inspect_missing_and_extra_reported():
+    # ab 的理论点为 (0,0)、(6,0)、(6,2.5) 毫米；实测第一点对齐、第二点多余
+    resp = client.post("/api/inspect", json={
+        "text": "ab", "width": 10, "points": "0,0\n9,9",
+    })
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["ok"] is True
+    assert data["perfect"] is False
+    assert data["matched"] == 1
+    assert data["missing"] == 2
+    assert data["missing_dots"] == [
+        {"row": 0, "cell": 1, "dot": 1},
+        {"row": 0, "cell": 1, "dot": 2},
+    ]
+    assert data["extra_points"] == [{"line": 2, "x": 9.0, "y": 9.0}]
+
+
+def test_inspect_empty_points_ok():
+    resp = client.post("/api/inspect", json={"text": "a", "width": 10, "points": ""})
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["matched"] == 0
+    assert data["missing"] == data["theory_dots"] == 1
+    assert data["extra"] == 0
+
+
+def test_inspect_bad_points_located():
+    resp = client.post("/api/inspect", json={
+        "text": "a", "width": 10, "points": "0,0\n1.25,3",
+    })
+    assert resp.status_code == 422
+    data = resp.json()
+    assert data["ok"] is False
+    err = data["errors"][0]
+    assert err["code"] == "bad_points"
+    assert err["field"] == "points"
+    assert (err["line"], err["col"]) == (2, 1)
+
+
+def test_inspect_text_too_long_100():
+    resp = client.post("/api/inspect", json={
+        "text": "a" * 101, "width": 10, "points": "",
+    })
+    assert resp.status_code == 422
+    errors = resp.json()["errors"]
+    assert [e["code"] for e in errors] == ["too_long"]
+    assert "100" in errors[0]["message"]
+
+
+def test_inspect_too_many_points():
+    resp = client.post("/api/inspect", json={
+        "text": "a", "width": 10, "points": "\n".join(["0,0"] * 401),
+    })
+    assert resp.status_code == 422
+    assert resp.json()["errors"][0]["code"] == "too_many_points"
+
+
+def test_inspect_text_and_points_errors_together():
+    resp = client.post("/api/inspect", json={
+        "text": "a1", "width": 10, "points": "x,y",
+    })
+    assert resp.status_code == 422
+    fields = {e["field"] for e in resp.json()["errors"]}
+    assert fields == {"text", "points"}
+
+
+def test_inspect_bad_width():
+    resp = client.post("/api/inspect", json={
+        "text": "a", "width": 41, "points": "",
+    })
+    assert resp.status_code == 422
+    assert [e["code"] for e in resp.json()["errors"]] == ["bad_width"]
+
+
+def test_inspect_missing_field():
+    resp = client.post("/api/inspect", json={"text": "a", "width": 10})
+    assert resp.status_code == 422
+    assert resp.json()["ok"] is False
